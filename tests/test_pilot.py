@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -621,6 +622,7 @@ class ReloadTests(unittest.TestCase):
         check.assert_called_once()
         self.assertIn("导入检查没通过", output.call_args.args[0])
 
+    @unittest.skipUnless(os.name == "posix", "Descriptor-preserving exec is POSIX-only")
     def test_exec_transfers_session_and_keeps_instance_lock(self):
         root = Path(__file__).resolve().parent.parent
         with tempfile.TemporaryDirectory() as directory:
@@ -717,7 +719,7 @@ class MattermostLoginTests(unittest.TestCase):
             ),
             patch("chat_agent_gateway.channels.mattermost.Api") as api,
         ):
-            with self.assertRaisesRegex(BridgeError, "Mac 终端"):
+            with self.assertRaisesRegex(BridgeError, "在终端"):
                 sign_in_mattermost()
             api.assert_not_called()
         with (

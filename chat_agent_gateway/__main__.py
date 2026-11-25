@@ -5,40 +5,54 @@ import sqlite3
 import subprocess
 import sys
 from importlib import import_module
-from pathlib import Path
 
 from .backends.codex import run_codex
+from .extensions import BACKEND_GROUP, CHANNEL_GROUP, installed, load
 from .notify import BridgeError
-from .paths import STATE_DIR
 from .workflow import RunJob
 
 BACKENDS: dict[str, RunJob] = {"codex": run_codex}
+CHANNELS = {"lark", "mattermost"}
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="chat-agent-gateway", description=__doc__)
+    external_backends = installed(BACKEND_GROUP, BACKENDS)
+    external_channels = installed(CHANNEL_GROUP, CHANNELS)
+    parser = argparse.ArgumentParser(prog="chat-agent-gateway")
     parser.add_argument(
-        "--backend", choices=BACKENDS, default="codex", help="处理对话和任务的执行后端"
+        "--backend",
+        choices=sorted(BACKENDS.keys() | external_backends.keys()),
+        default="codex",
+        help="处理对话和任务的执行后端",
     )
-    channels = parser.add_subparsers(dest="channel", required=True)
-    lark = channels.add_parser("lark", help="Lark 私聊助手和工单提醒")
-    lark.add_argument(
-        "mode", choices=("pair", "check", "migrate", "bind-mm", "pin-progress", "run")
+    parser.add_argument("channel", choices=sorted(CHANNELS | external_channels.keys()))
+    parser.add_argument(
+        "channel_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS
     )
-    mattermost = channels.add_parser("mattermost", help="Mattermost 审批自聊")
-    mattermost.add_argument("mode", choices=("preview", "check", "run"))
-    mattermost.add_argument("--state-dir", type=Path, default=STATE_DIR)
-    mattermost.add_argument("--resume-fd", type=int, help=argparse.SUPPRESS)
-    args = parser.parse_args(argv)
+    scope = parser.parse_args(argv)
 
-    if (
-        args.channel == "mattermost"
-        and args.resume_fd is not None
-        and args.mode != "run"
+    name = scope.channel
+    channel = (
+        import_module(f".channels.{name}", __package__)
+        if name in CHANNELS
+        else load(external_channels[name])
+    )
+    if not callable(getattr(channel, "configure_parser", None)) or not callable(
+        getattr(channel, "start", None)
     ):
-        mattermost.error("--resume-fd only applies to run")
-    channel = import_module(f".channels.{args.channel}", __package__)
-    channel.start(args, run_job=BACKENDS[args.backend])
+        raise BridgeError(f"渠道 {name} 须提供 configure_parser 和 start。")
+    channel_parser = argparse.ArgumentParser(prog=f"{parser.prog} {name}")
+    channel.configure_parser(channel_parser)
+    args = channel_parser.parse_args(scope.channel_args)
+    args.backend = scope.backend
+    backend = (
+        BACKENDS[scope.backend]
+        if scope.backend in BACKENDS
+        else load(external_backends[scope.backend])
+    )
+    if not callable(backend):
+        raise BridgeError(f"执行后端 {scope.backend} 须提供可调用的 run_job。")
+    channel.start(args, run_job=backend)
 
 
 if __name__ == "__main__":

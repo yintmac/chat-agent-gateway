@@ -1,13 +1,11 @@
 """Receive owner conversations and deliver external notices in a private Lark chat."""
 
 import asyncio
-import fcntl
 import json
 import os
 import re
 import secrets
 import sqlite3
-import stat
 import sys
 import tempfile
 from contextlib import closing, contextmanager
@@ -33,7 +31,9 @@ from lark_oapi.event.callback.model.p2_card_action_trigger import (
 )
 
 from ..approval import IN_FLIGHT, Approvals, Reply
+from ..config import SETTINGS
 from ..conversations import Conversations
+from ..local import acquire_lock, require_private
 from ..notify import (
     MATTERMOST,
     OPENPROJECT,
@@ -96,10 +96,8 @@ def text_reply_body(text, uuid=None):
 
 def read_config(path):
     try:
-        with path.open() as file:
-            info = os.fstat(file.fileno())
-            if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
-                raise BridgeError("Lark 凭据文件须由当前用户持有，权限须为 600。")
+        with path.open(encoding="utf-8") as file:
+            require_private(path, file, exact_mode=0o600)
             config = json.load(file)
     except FileNotFoundError:
         raise BridgeError("请先运行 pair，绑定你的 Lark 账号。") from None
@@ -177,9 +175,9 @@ def private_text(data):
 
 def pair(path):
     if path.exists():
-        raise BridgeError("这台 Mac 已绑定 Lark 应用。")
+        raise BridgeError("这台电脑已绑定 Lark 应用。")
     if not sys.stdin.isatty():
-        raise BridgeError("请在 Mac 终端运行 pair。")
+        raise BridgeError("请在终端运行 pair。")
     app_id = input("Lark App ID: ").strip()
     with catch_warnings():
         simplefilter("error", GetPassWarning)
@@ -494,6 +492,8 @@ class LarkChannel(ApprovalWorkflow):
         if request.get("conversation"):
             instruction = "".join(request["summary"].split()).rstrip("？?。！!")
             if OPEN_TICKETS_QUERY.fullmatch(instruction):
+                if self.op is None:
+                    raise BridgeError("请先配置 OpenProject，再查询名下工单。")
                 progress("查询 OpenProject 未关闭工单", detail="范围为分配给你的工单")
                 result, count = await asyncio.to_thread(
                     assigned_open_ticket_report, self.op
@@ -509,6 +509,8 @@ class LarkChannel(ApprovalWorkflow):
         if MATTERMOST and request["source"].startswith(f"{MATTERMOST}/_redirect/pl/"):
             ticket_id = request["topic"].removeprefix("ticket:")
             if ticket_id.isdecimal():
+                if self.op is None:
+                    raise BridgeError("请先配置 OpenProject，再读取关联工单。")
                 progress("读取关联工单", detail=f"OpenProject 工单 #{ticket_id}")
                 ticket = await asyncio.to_thread(
                     self.op.request, f"/api/v3/work_packages/{ticket_id}"
@@ -633,7 +635,7 @@ async def run(pilot, exited):
 
     worker = asyncio.create_task(execute())
     board_task = asyncio.create_task(refresh_board())
-    poll_task = asyncio.create_task(poll())
+    poll_task = asyncio.create_task(poll()) if pilot.op is not None else None
     mm_task = asyncio.create_task(
         watch_mattermost(
             pilot.cursor_path.with_name("mattermost-session.json"), pilot.approvals
@@ -641,7 +643,7 @@ async def run(pilot, exited):
     )
     try:
         while not exited.is_set():
-            if poll_task.done():
+            if poll_task is not None and poll_task.done():
                 await poll_task
             if worker.done():
                 await worker
@@ -757,13 +759,20 @@ def migrate_mattermost(state_dir, owner, inbox):
     return migrated
 
 
+def configure_parser(parser):
+    parser.add_argument(
+        "mode", choices=("pair", "check", "migrate", "bind-mm", "pin-progress", "run")
+    )
+
+
 def start(args, *, run_job: RunJob):
     STATE_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
+    require_private(STATE_DIR)
     config_path = STATE_DIR / "app.json"
     if args.mode == "bind-mm":
         read_config(config_path)
-        with (STATE_DIR / "mattermost-bind.lock").open("a") as bind_lock:
-            fcntl.flock(bind_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with (STATE_DIR / "mattermost-bind.lock").open("a+b") as bind_lock:
+            acquire_lock(bind_lock)
             enable_mattermost(STATE_DIR / "mattermost-session.json")
         return
     if args.mode == "pin-progress":
@@ -771,8 +780,8 @@ def start(args, *, run_job: RunJob):
         (STATE_DIR / PIN_MARKER).touch(mode=0o600, exist_ok=True)
         print("已启用 Lark 看板置顶，后台服务将在下次启动时发布。")
         return
-    with (STATE_DIR / "lock").open("a") as lark_lock:
-        fcntl.flock(lark_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with (STATE_DIR / "lock").open("a+b") as lark_lock:
+        acquire_lock(lark_lock)
         if args.mode == "pair":
             pair(config_path)
             return
@@ -781,16 +790,23 @@ def start(args, *, run_job: RunJob):
         if args.mode == "check":
             check(config, messages)
             return
-        with (MATTERMOST_STATE / "lock").open("a") as run_lock:
+        with (MATTERMOST_STATE / "lock").open("a+b") as run_lock:
             try:
-                fcntl.flock(run_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquire_lock(run_lock)
             except BlockingIOError:
                 raise BridgeError(
                     "Mattermost 审批服务仍在运行，请先停掉它再切换。"
                 ) from None
-            op = openproject_client()
-            if op.request("/api/v3/users/me")["id"] != OPENPROJECT_USER_ID:
-                raise BridgeError("OpenProject 登录身份与配置的用户不符。")
+            op = None
+            if (
+                args.mode == "migrate"
+                or OPENPROJECT
+                or OPENPROJECT_USER_ID is not None
+                or SETTINGS.openproject_api_key
+            ):
+                op = openproject_client()
+                if op.request("/api/v3/users/me")["id"] != OPENPROJECT_USER_ID:
+                    raise BridgeError("OpenProject 登录身份与配置的用户不符。")
             inbox = f"{INBOX}:{config['app_id']}"
             if args.mode == "migrate":
                 for task, ticket in migrate_mattermost(
@@ -822,11 +838,12 @@ def start(args, *, run_job: RunJob):
                 .register_p2_im_message_receive_v1(pilot.receive_message)
                 .build()
             )
-            with (STATE_DIR / "worker.lock").open("a") as running:
-                fcntl.flock(running, fcntl.LOCK_EX)
+            with (STATE_DIR / "worker.lock").open("a+b") as running:
+                acquire_lock(running, blocking=True)
                 with long_connection(config, handler) as exited:
                     print(
-                        "Lark 对话服务已启动。OpenProject 每 60 秒检查一次。",
+                        "Lark 对话服务已启动。"
+                        + ("OpenProject 每 60 秒检查一次。" if op is not None else ""),
                         flush=True,
                     )
                     asyncio.run(run(pilot, exited))

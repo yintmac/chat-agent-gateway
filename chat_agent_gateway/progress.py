@@ -1,10 +1,10 @@
 """Read-only task and progress views shared by the local monitor and Lark."""
 
-import fcntl
 import sqlite3
 from contextlib import closing
 
 from .approval import IN_FLIGHT
+from .local import acquire_lock
 
 MAX_TASKS = 12
 MAX_EVENTS = 40
@@ -20,8 +20,8 @@ id,status,is_blocked,substr(json_extract(request,'$.summary'),1,160)
 
 def worker_online(state):
     try:
-        with (state / "worker.lock").open("rb") as lock:
-            fcntl.flock(lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        with (state / "worker.lock").open("r+b") as lock:
+            acquire_lock(lock)
     except FileNotFoundError:
         return False
     except BlockingIOError:

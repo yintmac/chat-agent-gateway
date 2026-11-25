@@ -5,6 +5,8 @@ description = "Connect chat conversations to AI agents for workspace tasks."
 requires-python = ">=3.11"
 dependencies = [
     "lark-oapi==1.8.0",
+    "portalocker>=3.2,<4",
+    "pywin32>=308 ; sys_platform == 'win32'",
     "websockets==15.0.1",
 ]
 

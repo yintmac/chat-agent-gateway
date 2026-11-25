@@ -1,7 +1,6 @@
 """Run the local, approval-gated OpenProject / Mattermost pilot."""
 
 import asyncio
-import fcntl
 import json
 import os
 import re
@@ -19,6 +18,7 @@ from threading import Lock
 from urllib.parse import quote, urlsplit
 
 from ..approval import IN_FLIGHT, Approvals, Reply, Request
+from ..local import acquire_lock, require_private
 from ..notify import (
     MATTERMOST,
     OPENPROJECT,
@@ -31,7 +31,7 @@ from ..notify import (
     openproject_client,
 )
 from ..openproject_watch import assigned_open_tickets, ticket_summary
-from ..paths import PROJECT_DIR
+from ..paths import PROJECT_DIR, STATE_DIR
 from ..workspaces import (
     BRANCHES,
     available_repositories,
@@ -64,7 +64,7 @@ def sign_in_mattermost():
     if not MATTERMOST or not RECIPIENT_EMAIL:
         raise BridgeError("请在本机配置 Mattermost origin 和 email。")
     if not sys.stdin.isatty():
-        raise BridgeError("请在 Mac 终端运行，并在本机输入 Mattermost 密码和验证码。")
+        raise BridgeError("请在终端运行，并在本机输入 Mattermost 密码和验证码。")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", GetPassWarning)
@@ -626,13 +626,23 @@ async def run(pilot, revision=None):
     return reloading
 
 
+def configure_parser(parser):
+    import argparse
+
+    parser.add_argument("mode", choices=("preview", "check", "run"))
+    parser.add_argument("--state-dir", type=Path, default=STATE_DIR)
+    parser.add_argument("--resume-fd", type=int, help=argparse.SUPPRESS)
+
+
 def start(args, *, run_job: RunJob):
+    if args.resume_fd is not None and (args.mode != "run" or os.name != "posix"):
+        raise BridgeError("--resume-fd only applies to POSIX run.")
     authorization, lock_fd = (
         read_reload_session(args.resume_fd)
         if args.resume_fd is not None
         else (None, None)
     )
-    revision = code_revision() if args.mode == "run" else None
+    revision = code_revision() if args.mode == "run" and os.name == "posix" else None
     op = openproject_client()
     if op.request("/api/v3/users/me")["id"] != OPENPROJECT_USER_ID:
         raise BridgeError("OpenProject 登录身份与配置的用户不符。")
@@ -646,14 +656,15 @@ def start(args, *, run_job: RunJob):
             print("OpenProject 和 Mattermost 登录验证通过。", flush=True)
         return
     args.state_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+    require_private(args.state_dir)
     lock_path = args.state_dir / "lock"
     with (
-        os.fdopen(lock_fd, "a") if lock_fd is not None else lock_path.open("a")
+        os.fdopen(lock_fd, "a+b") if lock_fd is not None else lock_path.open("a+b")
     ) as lock:
         if not os.path.samestat(os.fstat(lock.fileno()), lock_path.stat()):
             raise BridgeError("自动重载的运行锁与当前审批目录不符。")
         os.set_inheritable(lock.fileno(), False)
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        acquire_lock(lock)
         if (args.state_dir / "lark" / "approvals.sqlite3").exists():
             raise BridgeError("审批服务已切换到 Lark。")
         with mattermost_session(authorization) as (mm, person):

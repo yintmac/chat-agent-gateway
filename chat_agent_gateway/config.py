@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .local import require_private
 from .paths import PROJECT_DIR
 
 CONFIG_PATH = (
@@ -57,10 +58,8 @@ def https_origin(value):
 
 def read_settings(path=CONFIG_PATH):
     try:
-        with path.open() as file:
-            info = os.fstat(file.fileno())
-            if info.st_uid != os.getuid() or info.st_mode & 0o077:
-                raise ValueError("网关配置须由当前用户持有，且其他用户无权访问。")
+        with path.open(encoding="utf-8-sig") as file:
+            require_private(path, file)
             data = json.load(file)
     except FileNotFoundError:
         return Settings()

@@ -1,7 +1,5 @@
 import asyncio
-import fcntl
 import json
-import os
 import sqlite3
 import sys
 import tempfile
@@ -14,6 +12,7 @@ from chat_agent_gateway.approval import Approvals
 from chat_agent_gateway.backends.codex import codex_output
 from chat_agent_gateway.backends.codex_events import read_events
 from chat_agent_gateway.conversations import Conversations
+from chat_agent_gateway.local import acquire_lock
 from chat_agent_gateway.monitor import MAX_EVENTS, Monitor, snapshot, status_text
 from chat_agent_gateway.notify import BridgeError
 
@@ -122,20 +121,21 @@ class CodexStreamTests(unittest.IsolatedAsyncioTestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = Path(directory.name)
-        env = patch.dict(
-            os.environ, {"PATH": str(self.path) + os.pathsep + os.environ["PATH"]}
+        self.executable = self.path / "codex-fixture.py"
+        executable = patch(
+            "chat_agent_gateway.backends.codex.codex_command",
+            return_value=(sys.executable, str(self.executable)),
         )
-        env.start()
-        self.addCleanup(env.stop)
+        executable.start()
+        self.addCleanup(executable.stop)
 
     def fixture(self, script):
-        executable = self.path / "codex"
-        executable.write_text(
-            f"#!{sys.executable}\nimport sys, os, time\nfrom pathlib import Path\n"
+        self.executable.write_text(
+            "import sys, time\nfrom pathlib import Path\n"
             "response = Path(sys.argv[sys.argv.index('--output-last-message')+1])\n"
-            + script
+            + script,
+            encoding="utf-8",
         )
-        executable.chmod(0o700)
 
     async def test_final_response_is_independent_from_events_and_preserves_exact_limit(
         self,
@@ -143,7 +143,7 @@ class CodexStreamTests(unittest.IsolatedAsyncioTestCase):
         self.fixture(
             "assert sys.stdin.read() == 'first\\nsecond'\n"
             'print(\'{"type":"turn.started"}\',flush=True)\n'
-            "response.write_text('界'*3500+'\\n')\n"
+            "response.write_text('界'*3500+'\\n', encoding='utf-8')\n"
         )
         labels = []
         answer = await codex_output(
@@ -156,7 +156,7 @@ class CodexStreamTests(unittest.IsolatedAsyncioTestCase):
         for script, error in (
             ("sys.exit(9)", "状态码 9"),
             ("pass", "没有返回最终回复"),
-            ("response.write_text('x'*3501)", "超过 3500"),
+            ("response.write_text('x'*3501, encoding='utf-8')", "超过 3500"),
             ("print('private-output')", "无法识别"),
         ):
             with self.subTest(error=error):
@@ -167,30 +167,38 @@ class CodexStreamTests(unittest.IsolatedAsyncioTestCase):
                     )
 
     async def test_cancellation_reaps_the_process_while_both_pipes_are_active(self):
-        self.fixture(
-            f"Path({str(self.path / 'pid')!r}).write_text(str(os.getpid()))\n"
-            'print(\'{"type":"turn.started"}\',flush=True)\n'
-            "time.sleep(30)\n"
-        )
+        self.fixture('print(\'{"type":"turn.started"}\',flush=True)\ntime.sleep(30)\n')
         started = asyncio.Event()
-        task = asyncio.create_task(
-            codex_output(
-                "a" * 1_000_000,
-                self.path,
-                "read-only",
-                progress=lambda _: started.set(),
+        processes = []
+        create_original = asyncio.create_subprocess_exec
+
+        async def capture_process(*args, **kwargs):
+            process = await create_original(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with patch(
+            "chat_agent_gateway.backends.codex.asyncio.create_subprocess_exec",
+            side_effect=capture_process,
+        ):
+            task = asyncio.create_task(
+                codex_output(
+                    "a" * 1_000_000,
+                    self.path,
+                    "read-only",
+                    progress=lambda _: started.set(),
+                )
             )
-        )
-        try:
-            await asyncio.wait_for(started.wait(), 3)
-        finally:
-            task.cancel()
-            (result,) = await asyncio.wait_for(
-                asyncio.gather(task, return_exceptions=True), 7
-            )
-        self.assertIsInstance(result, asyncio.CancelledError)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(int((self.path / "pid").read_text()), 0)
+            try:
+                await asyncio.wait_for(started.wait(), 8)
+            finally:
+                task.cancel()
+                (result,) = await asyncio.wait_for(
+                    asyncio.gather(task, return_exceptions=True), 8
+                )
+                self.assertIsInstance(result, asyncio.CancelledError)
+            self.assertEqual(len(processes), 1)
+            self.assertIsNotNone(processes[0].returncode)
 
 
 class MonitorTests(unittest.TestCase):
@@ -203,8 +211,8 @@ class MonitorTests(unittest.TestCase):
             dialogs = Conversations(queue)
             first = dialogs.receive("dm", "first", "检查第一个需求", [])
             second = dialogs.receive("dm", "next", "后续任务", [])
-            with (state / "worker.lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with (state / "worker.lock").open("a+b") as lock:
+                acquire_lock(lock, blocking=True)
                 queue.claim(first)
                 for i in range(MAX_EVENTS + 3):
                     dialogs.progress(first, f"步骤 {i}")

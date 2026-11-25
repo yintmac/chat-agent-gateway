@@ -1,9 +1,13 @@
 import io
+import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from chat_agent_gateway import __main__ as gateway
+from chat_agent_gateway.notify import BridgeError
 
 
 class GatewayCLITests(unittest.TestCase):
@@ -32,3 +36,42 @@ class GatewayCLITests(unittest.TestCase):
                 self.assertEqual(error.exception.code, 2)
         lark.assert_not_called()
         mattermost.assert_not_called()
+
+    def test_installed_channel_and_agent_entry_points_can_be_combined(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metadata = root / "gateway_fixture-1.0.dist-info"
+            metadata.mkdir()
+            (metadata / "entry_points.txt").write_text(
+                "[chat_agent_gateway.channels]\nwire-fixture = gateway_plugin_fixture\n"
+                "[chat_agent_gateway.backends]\nagent-fixture = gateway_plugin_fixture:run_job\n"
+            )
+            (root / "gateway_plugin_fixture.py").write_text(
+                "import asyncio\n"
+                "def configure_parser(parser):\n"
+                "    parser.add_argument('--message', required=True)\n"
+                "def start(args, *, run_job):\n"
+                "    print(asyncio.run(run_job({'summary': args.message}))[0])\n"
+                "async def run_job(request, *, progress=None):\n"
+                "    return 'agent reply: ' + request['summary'], False\n"
+            )
+            stream = io.StringIO()
+            with (
+                patch.object(sys, "path", [directory, *sys.path]),
+                patch("sys.stdout", stream),
+            ):
+                gateway.main(
+                    ["--backend", "agent-fixture", "wire-fixture", "--message", "hello"]
+                )
+            self.assertEqual(stream.getvalue().strip(), "agent reply: hello")
+            sys.modules.pop("gateway_plugin_fixture", None)
+
+    def test_plugins_cannot_override_an_existing_backend(self):
+        from importlib.metadata import EntryPoint
+
+        entry = EntryPoint("codex", "invalid:load", "chat_agent_gateway.backends")
+        with (
+            patch("chat_agent_gateway.extensions.entry_points", return_value=[entry]),
+            self.assertRaisesRegex(BridgeError, "适配器名称重复"),
+        ):
+            gateway.main(["lark", "run"])

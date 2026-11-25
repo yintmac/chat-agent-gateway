@@ -9,6 +9,7 @@ from time import time
 
 from websockets.exceptions import WebSocketException
 
+from ..credentials import read_secret, write_secret
 from ..notify import (
     MATTERMOST,
     RECIPIENT_EMAIL,
@@ -28,24 +29,10 @@ KEYCHAIN_SERVICE = "chat-agent-gateway-lark-mattermost-session"
 TOKEN = re.compile(r"[A-Za-z0-9._~-]+")
 
 
-def keychain_token():
-    found = subprocess.run(
-        [
-            "/usr/bin/security",
-            "find-generic-password",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-a",
-            RECIPIENT_EMAIL,
-            "-w",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    token = found.stdout.strip()
-    if found.returncode or not TOKEN.fullmatch(token):
-        raise BridgeError("无法从 Mac 钥匙串读取 Mattermost 会话。")
+def stored_token():
+    token = read_secret(KEYCHAIN_SERVICE, RECIPIENT_EMAIL)
+    if not TOKEN.fullmatch(token):
+        raise BridgeError("Mattermost 会话凭据格式有误。")
     return token
 
 
@@ -59,17 +46,9 @@ def enable_mattermost(path):
 
     asyncio.run(check_connection())
     token = mm.authorization.removeprefix("Bearer ")
-    # security's interactive mode reads the command from a pipe. The token
-    # stays out of the shell, environment, and the child process arguments.
-    saved = subprocess.run(
-        ["/usr/bin/security", "-i"],
-        input=f'add-generic-password -U -s {KEYCHAIN_SERVICE} -a {RECIPIENT_EMAIL} -w "{token}"\n',
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if saved.returncode or keychain_token() != token:
-        raise BridgeError("Mattermost 会话写入 Mac 钥匙串失败。")
+    write_secret(KEYCHAIN_SERVICE, RECIPIENT_EMAIL, token)
+    if stored_token() != token:
+        raise BridgeError("Mattermost 会话凭据写入后无法核验。")
     write_state(path, {"expires": expires.timestamp() if expires else None})
     deadline = expires.strftime("%Y-%m-%d %H:%M:%S %Z") if expires else "服务器未提供"
     print(
@@ -112,7 +91,7 @@ async def watch_mattermost(path, approvals):
             expires = json.loads(path.read_text())["expires"]
             if expires is not None and time() >= expires:
                 raise BridgeError("Mattermost 会话已到期，请重新绑定。")
-            token = await asyncio.to_thread(keychain_token)
+            token = await asyncio.to_thread(stored_token)
         except (
             BridgeError,
             OSError,

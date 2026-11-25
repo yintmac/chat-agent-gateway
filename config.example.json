@@ -1,13 +1,6 @@
 {
-  "openproject": {
-    "origin": "https://openproject.example.com",
-    "user_id": 1001,
-    "api_key": ""
-  },
-  "mattermost": {
-    "origin": "",
-    "email": ""
-  },
+  "openproject": {},
+  "mattermost": {},
   "workspace_root": "",
   "workspace_branches": {}
 }

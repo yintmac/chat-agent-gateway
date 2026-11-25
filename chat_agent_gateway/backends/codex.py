@@ -64,6 +64,17 @@ def prompt_input(instructions, context, request):
     return parts()
 
 
+def codex_command():
+    if os.name == "nt":
+        for entry in os.get_exec_path():
+            directory = Path(entry.strip('"'))
+            executable = directory / "codex.exe"
+            if directory.is_absolute() and executable.is_file():
+                return (str(executable),)
+        raise BridgeError("Windows 请安装 Codex CLI 原生 codex.exe 并加入 PATH。")
+    return ("codex",)
+
+
 async def codex_output(prompt, directory, sandbox, *, schema=None, progress=None):
     environment = {
         name: os.environ[name]
@@ -80,6 +91,26 @@ async def codex_output(prompt, directory, sandbox, *, schema=None, progress=None
         )
         if name in os.environ
     }
+    if os.name == "nt":
+        for name in (
+            "SYSTEMROOT",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "PROGRAMDATA",
+            "PROGRAMFILES",
+            "PROGRAMFILES(X86)",
+            "PROGRAMW6432",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "TEMP",
+            "TMP",
+        ):
+            if name in os.environ:
+                environment[name] = os.environ[name]
     proxies = getproxies()
     environment.update(
         {
@@ -97,7 +128,7 @@ async def codex_output(prompt, directory, sandbox, *, schema=None, progress=None
 
 async def _execute(prompt, directory, sandbox, schema, progress, environment, response):
     process = await asyncio.create_subprocess_exec(
-        "codex",
+        *codex_command(),
         "exec",
         "--ignore-user-config",
         "--ephemeral",

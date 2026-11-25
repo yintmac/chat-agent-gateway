@@ -191,6 +191,21 @@ class LarkPilotTest(unittest.TestCase):
             "om_user", "这次处理卡住了。OpenProject 请求超时"
         )
 
+    def test_conversation_runs_without_openproject_and_requires_it_for_ticket_queries(
+        self,
+    ):
+        self.pilot.op = None
+        self.pilot.receive_message(direct_message("你好"))
+        self.pilot.receive_message(
+            direct_message("查一下 OP 上我有哪些未关闭工单", message="om_tickets")
+        )
+        asyncio.run(self.pilot.execute())
+        self.pilot.deliver()
+        self.run_job.assert_awaited_once()
+        self.messages.reply.assert_any_call(
+            "om_tickets", "这次处理卡住了。请先配置 OpenProject，再查询名下工单。"
+        )
+
     def test_openproject_query_reports_lark_limit_without_returning_a_partial_list(
         self,
     ):

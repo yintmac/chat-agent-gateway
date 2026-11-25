@@ -1,5 +1,6 @@
 import json
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 
@@ -46,12 +47,37 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("fixture-api-key", repr(settings))
 
     def test_rejects_group_readable_config_and_urls_that_carry_credentials(self):
-        self.write({}, mode=0o640)
-        with self.assertRaises(ValueError):
-            read_settings(self.path)
+        if sys.platform != "win32":
+            self.write({}, mode=0o640)
+            with self.assertRaises(PermissionError):
+                read_settings(self.path)
         self.write(
             {"openproject": {"origin": "https://user:example@openproject.example.com"}}
         )
         with self.assertRaisesRegex(ValueError, "HTTPS") as caught:
             read_settings(self.path)
         self.assertNotIn("user:example", str(caught.exception))
+
+    @unittest.skipUnless(sys.platform == "win32", "NTFS ACL test")
+    def test_windows_rejects_an_acl_that_allows_everyone_to_read_settings(self):
+        import win32con
+        import win32security
+
+        self.write({})
+        filename = str(self.path)
+        object_type = win32security.SE_FILE_OBJECT
+        acl_information = win32security.DACL_SECURITY_INFORMATION
+        descriptor = win32security.GetNamedSecurityInfo(
+            filename, object_type, acl_information
+        )
+        dacl = descriptor.GetSecurityDescriptorDacl()
+        dacl.AddAccessAllowedAce(
+            win32security.ACL_REVISION,
+            win32con.GENERIC_READ,
+            win32security.ConvertStringSidToSid("S-1-1-0"),
+        )
+        win32security.SetNamedSecurityInfo(
+            filename, object_type, acl_information, None, None, dacl, None
+        )
+        with self.assertRaises(PermissionError):
+            read_settings(self.path)

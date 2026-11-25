@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import os
 import plistlib
 import shutil
@@ -18,10 +17,11 @@ from pathlib import Path
 
 from chat_agent_gateway.approval import IN_FLIGHT
 from chat_agent_gateway.config import CONFIG_PATH
+from chat_agent_gateway.local import acquire_lock
 from chat_agent_gateway.paths import PROJECT_DIR, STATE_DIR
 
 LABEL = "local.chat-agent-gateway"
-DOMAIN = f"gui/{os.getuid()}"
+DOMAIN = f"gui/{os.getuid()}" if sys.platform == "darwin" else ""
 TARGET = f"{DOMAIN}/{LABEL}"
 PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
 STATE = STATE_DIR / "lark"
@@ -125,11 +125,11 @@ def stop() -> None:
         launchctl("bootout", TARGET)
         lock = STATE / "lock"
         if lock.exists():
-            with lock.open("rb") as file:
+            with lock.open("r+b") as file:
                 deadline = time.monotonic() + 30
                 while True:
                     try:
-                        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        acquire_lock(file)
                         break
                     except BlockingIOError:
                         if time.monotonic() >= deadline:
@@ -178,12 +178,16 @@ def main() -> None:
         "action", choices=("install", "start", "stop", "restart", "status")
     )
     action = parser.parse_args().action
+    if sys.platform != "darwin":
+        raise RuntimeError(
+            "manage.py 管理 macOS LaunchAgent。Windows 请通过 CLI 运行网关。"
+        )
     if action == "status":
         print(f"{LABEL}  {job_status() or '未加载'}")
         return
     STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (STATE / "launchd.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with (STATE / "launchd.lock").open("a+b") as lock:
+        acquire_lock(lock)
         loaded = job_status() is not None
         if action == "install":
             install(loaded)

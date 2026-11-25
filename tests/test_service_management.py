@@ -1,6 +1,7 @@
 import plistlib
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -14,6 +15,7 @@ from chat_agent_gateway.paths import PROJECT_DIR, STATE_DIR
 from chat_agent_gateway.channels.lark import STATE_DIR as LARK_STATE
 
 
+@unittest.skipUnless(sys.platform == "darwin", "LaunchAgent is macOS-only")
 class ServiceManagementTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()

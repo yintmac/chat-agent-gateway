@@ -3,7 +3,6 @@
 
 import argparse
 import base64
-import fcntl
 import json
 import os
 import re
@@ -18,6 +17,8 @@ from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .config import SETTINGS
+from .credentials import read_secret
+from .local import acquire_lock, require_private
 from .paths import STATE_DIR
 
 OPENPROJECT = SETTINGS.openproject_origin
@@ -102,15 +103,13 @@ def openproject_client():
 def mattermost_client(service=KEYCHAIN_SERVICE):
     if not MATTERMOST or not RECIPIENT_EMAIL:
         raise BridgeError("请在本机配置 Mattermost origin 和 email。")
-    result = subprocess.run(
-        ["/usr/bin/security", "find-generic-password", "-s", service, "-w"],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode or not result.stdout.strip():
-        raise BridgeError(f"Mattermost token unavailable in Keychain ({service})")
-    return Api(MATTERMOST, f"Bearer {result.stdout.strip()}")
+    try:
+        token = read_secret(service, RECIPIENT_EMAIL if os.name == "nt" else None)
+    except OSError as error:
+        raise BridgeError(str(error)) from error
+    if not token:
+        raise BridgeError("Mattermost 会话凭据为空。")
+    return Api(MATTERMOST, f"Bearer {token}")
 
 
 def notification_path(page_size, reasons=REASONS):
@@ -185,14 +184,18 @@ def message_for(item):
 
 
 def write_state(path, state):
-    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
-        temporary = Path(output.name)
-        try:
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, delete=False
+        ) as output:
+            temporary = Path(output.name)
             json.dump(state, output)
             output.flush()
             os.fsync(output.fileno())
-            os.replace(temporary, path)
-        finally:
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
             temporary.unlink(missing_ok=True)
 
 
@@ -281,9 +284,10 @@ def main():
         return
 
     args.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (args.state_dir / "lock").open("a") as lock:
+    require_private(args.state_dir)
+    with (args.state_dir / "lock").open("a+b") as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquire_lock(lock)
         except BlockingIOError:
             raise BridgeError(
                 "Another notification process is already running"
