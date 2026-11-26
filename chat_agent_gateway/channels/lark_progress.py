@@ -5,7 +5,7 @@ import sys
 from secrets import token_hex
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from threading import Lock
 from time import monotonic, time
 from urllib.parse import urlencode
@@ -94,7 +94,7 @@ def progress_card(view, stamp, chat):
             "elements": [
                 plain(
                     "最后更新 "
-                    + datetime.fromtimestamp(stamp)
+                    + datetime.fromtimestamp(stamp, UTC)
                     .astimezone()
                     .strftime("%m-%d %H:%M:%S %Z")
                 )

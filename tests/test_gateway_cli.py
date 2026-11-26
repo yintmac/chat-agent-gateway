@@ -1,4 +1,6 @@
 import io
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,6 +13,17 @@ from chat_agent_gateway.notify import BridgeError
 
 
 class GatewayCLITests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "win32", "Windows console encoding test")
+    def test_windows_cli_uses_utf8_with_redirected_output(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "chat_agent_gateway", "--help"],
+            env={**os.environ, "PYTHONIOENCODING": "cp1252"},
+            capture_output=True,
+            check=True,
+            timeout=15,
+        )
+        self.assertIn("处理对话和任务的执行后端", result.stdout.decode("utf-8"))
+
     def test_both_channels_receive_the_explicitly_selected_backend(self):
         backend = AsyncMock()
         with patch.dict(gateway.BACKENDS, {"fixture": backend}):

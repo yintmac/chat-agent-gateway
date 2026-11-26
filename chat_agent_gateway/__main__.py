@@ -56,6 +56,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if stream is not None:
+                stream.reconfigure(encoding="utf-8")
     try:
         main()
     except (KeyboardInterrupt, EOFError):
