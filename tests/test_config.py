@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from chat_agent_gateway.config import Settings, read_settings
+from tests import make_private_file
 
 
 class ConfigTests(unittest.TestCase):
@@ -15,7 +16,7 @@ class ConfigTests(unittest.TestCase):
 
     def write(self, value, mode=0o600):
         self.path.write_text(json.dumps(value))
-        self.path.chmod(mode)
+        make_private_file(self.path, mode)
 
     def test_missing_config_does_not_select_any_external_service_or_workspace(self):
         self.assertEqual(read_settings(self.path), Settings())
